@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "bridgeassist",
+  "version": "${version}",
+  "name": "Bridge Assist: Speedbridge",
+  "description": "Assisted bridges, staircases and towers with observed-world confirmation, click diagnostics and stabilized aiming.",
+  "authors": [
+    "Bridge Assist contributors"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.bridgeassist.BridgeAssistClient"
+    ]
+  },
+  "mixins": [
+    "bridgeassist.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.9",
+    "minecraft": "1.21.4",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

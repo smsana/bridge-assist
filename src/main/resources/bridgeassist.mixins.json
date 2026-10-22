@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "dev.bridgeassist.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "MinecraftClientAccessor",
+    "KeyboardInputMixin",
+    "MouseMixin",
+    "ClientWorldAccessor",
+    "PendingUpdateManagerAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
