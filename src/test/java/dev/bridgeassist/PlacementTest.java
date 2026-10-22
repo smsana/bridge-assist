@@ -15,11 +15,20 @@ public final class PlacementTest {
     private static void horizontalNetworkTests() {
         HorizontalCycle cycle=new HorizontalCycle();
         check(cycle.update(true,false,false,false,.5,0)==HorizontalCycle.Phase.APPROACH,"approach starts on confirmed old floor");
-        check(cycle.allowMovement() && cycle.crouch() && !cycle.allowClick(),"approach is slow and crouched, no moving click");
+        check(cycle.allowMovement() && !cycle.crouch() && cycle.inputScale()==1 && !cycle.allowClick(),"safe approach is normal walking, never permanent crouch");
         check(cycle.update(true,false,false,false,-.121,0)==HorizontalCycle.Phase.SETTLE,"stop at safe overhang");
         check(!cycle.allowMovement() && cycle.allowClick(),"stopped movement DOES NOT disable placement");
-        check(cycle.update(true,false,false,false,.10,.10)==HorizontalCycle.Phase.SETTLE,"braking includes residual velocity before edge");
-        check(cycle.update(true,false,false,false,.10,0)==HorizontalCycle.Phase.APPROACH,"can approach again after braking, without B");
+        cycle.reset();
+        check(cycle.update(true,false,false,false,.10,.10)==HorizontalCycle.Phase.BRAKE,"braking includes residual velocity before edge");
+        check(!cycle.allowMovement() && cycle.crouch() && !cycle.allowClick(),"brake is stationary and cannot click");
+        check(cycle.update(true,false,false,false,.10,0)==HorizontalCycle.Phase.EDGE_APPROACH,"stopped before edge resumes only a short controlled approach");
+        check(cycle.allowMovement() && cycle.crouch() && cycle.inputScale()==.65,"only edge approach uses reduced crouch input");
+        check(cycle.update(true,false,false,false,-.081,.03)==HorizontalCycle.Phase.SETTLE,"visible-face overhang stops motion");
+        check(cycle.crouch() && !cycle.allowMovement() && cycle.allowClick(),"settle holds and allows normal placement checks");
+        check(cycle.update(true,true,false,false,-.081,0)==HorizontalCycle.Phase.CROSS,"confirmed next block immediately releases brake");
+        check(!cycle.crouch() && cycle.inputScale()==1 && cycle.allowMovement(),"confirmed crossing is normal walking");
+        cycle.reset();
+        check(cycle.update(true,false,false,false,.5,0)==HorizontalCycle.Phase.APPROACH,"new run does not inherit edge creep");
         check(cycle.update(true,false,false,true,-.12,0)==HorizontalCycle.Phase.WAIT_CONFIRM,"foreign prediction blocks motion too");
         check(!cycle.allowMovement() && !cycle.allowClick(),"predicted floor is neither permission to walk nor repeat");
         check(cycle.update(false,true,false,false,.1,0)==HorizontalCycle.Phase.UNSAFE,"lost old support beats confirmed next");
@@ -50,6 +59,18 @@ public final class PlacementTest {
                         !=HorizontalCycle.Phase.CROSS,"rejection retains old confirmed support");
                 check(!cycle.allowMovement(),"no forward movement after rejection");
             }
+        }
+        for(double initialVelocity:new double[]{0,.03,.08,.12,.18}) {
+            cycle.reset();double distance=1.2,velocity=initialVelocity;boolean reached=false;int walking=0;
+            for(int t=0;t<160;t++) {
+                cycle.update(true,false,false,false,distance,velocity);
+                if(cycle.phase()==HorizontalCycle.Phase.APPROACH) {walking++;check(!cycle.crouch() && cycle.inputScale()==1,"safe floor does not use slow crouch");}
+                double acceleration=cycle.allowMovement()?.098*cycle.inputScale()*(cycle.crouch()?.3:1):0;
+                double displacement=velocity+acceleration;distance-=displacement;velocity=displacement*.546;
+                check(distance>-.29,"braking never consumes the whole .3-block footprint overlap");
+                if(cycle.phase()==HorizontalCycle.Phase.SETTLE && velocity<.008) {reached=true;break;}
+            }
+            check(reached && walking>0,"normal approach safely reaches a stationary visible-face position");
         }
         PlacementTracker noReply=new PlacementTracker();noReply.clicked(1,face(0),0,0);
         check(noReply.observeWorld(false,false,20,1000,20)==PlacementTracker.Result.TIMED_OUT,"no-result attempt eventually times out");

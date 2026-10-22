@@ -310,11 +310,13 @@ public final class BridgeAssistClient implements ClientModInitializer {
             targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
             return;
         }
-        if (!horizontalClickAllowed) {
+        if (!horizontalClickAllowed && horizontal.phase()==HorizontalCycle.Phase.APPROACH) {
             clearPlacementAim();
             targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
             return;
         }
+        // Prepare the real interaction ray while braking; clicking still requires SETTLE.
+
         updateAimForPlacement(c,next,support,travel,false);
         boolean contained=c.player.getBoundingBox().minX>=support.getX()+.005
                 && c.player.getBoundingBox().maxX<=support.getX()+.995
@@ -329,7 +331,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
 
     private static void beginRun(MinecraftClient c, int requestedSide) {
         side = requestedSide;
-        clearPlacementAim();aimVariationSeed=new java.util.Random().nextLong();
+        clearPlacementAim();horizontal.reset();aimVariationSeed=new java.util.Random().nextLong();
         boolean follow=activeMode==VerticalCycle.Mode.HORIZONTAL && SpeedbridgeLogic.stance(config.stanceMode)==SpeedbridgeLogic.Stance.FOLLOW_INPUT;
         SpeedbridgeLogic.Heading heading=follow?SpeedbridgeLogic.heading(c.player.getYaw(),side):bridgeAxis.fixed(c.player.getYaw(),side);
         if(follow)bridgeAxis.remember(heading,side);
