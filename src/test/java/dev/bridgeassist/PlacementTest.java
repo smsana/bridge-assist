@@ -20,11 +20,13 @@ public final class PlacementTest {
         check(!cycle.allowMovement() && cycle.allowClick(),"stopped movement DOES NOT disable placement");
         cycle.reset();
         check(cycle.update(true,false,false,false,.10,.10)==HorizontalCycle.Phase.BRAKE,"braking includes residual velocity before edge");
-        check(!cycle.allowMovement() && cycle.crouch() && cycle.allowClick(),"braking does not forbid a separately validated ray");
-        check(cycle.update(true,false,false,false,.10,0)==HorizontalCycle.Phase.EDGE_APPROACH,"stopped before edge resumes only a short controlled approach");
-        check(cycle.allowMovement() && cycle.allowClick() && cycle.crouch() && cycle.inputScale()==.65,"only edge approach uses reduced crouch input");
-        check(cycle.update(true,false,false,false,-.181,.03)==HorizontalCycle.Phase.SETTLE,"visible-face overhang stops motion");
-        check(cycle.crouch() && !cycle.allowMovement() && cycle.allowClick(),"settle holds and allows normal placement checks");
+        check(!cycle.allowMovement() && !cycle.crouch() && cycle.allowClick(),"ordinary coasting brake does not press Shift");
+        check(cycle.update(true,false,false,false,-.01,0)==HorizontalCycle.Phase.EDGE_APPROACH,"precise approach fills unused safe stopping distance");
+        check(cycle.allowMovement() && cycle.allowClick() && !cycle.crouch() && cycle.inputScale()>0 && cycle.inputScale()<1,"edge pacing changes input, not sneak");
+        check(cycle.update(true,false,false,false,-.13,.01)==HorizontalCycle.Phase.SETTLE,"visible-face overhang stops motion");
+        check(!cycle.crouch() && !cycle.allowMovement() && cycle.allowClick(),"safe stationary dwell does not need sneak");
+        check(cycle.update(true,false,false,false,-.20,.12)==HorizontalCycle.Phase.SETTLE,"unexpected momentum is detected at edge");
+        check(cycle.crouch() && !cycle.allowMovement(),"dangerous residual momentum enables emergency sneak");
         check(cycle.update(true,true,false,false,-.181,0)==HorizontalCycle.Phase.CROSS,"confirmed next block immediately releases brake");
         check(!cycle.crouch() && cycle.inputScale()==1 && cycle.allowMovement(),"confirmed crossing is normal walking");
         cycle.reset();
@@ -66,12 +68,30 @@ public final class PlacementTest {
                 cycle.update(true,false,false,false,distance,velocity);
                 if(cycle.phase()==HorizontalCycle.Phase.APPROACH) {walking++;check(!cycle.crouch() && cycle.inputScale()==1,"safe floor does not use slow crouch");}
                 double acceleration=cycle.allowMovement()?.098*cycle.inputScale()*(cycle.crouch()?.3:1):0;
+                check(!cycle.crouch(),"normal supported approach/brake/dwell never uses sneak");
                 double displacement=velocity+acceleration;distance-=displacement;velocity=displacement*.546;
                 check(distance>-.29,"braking never consumes the whole .3-block footprint overlap");
                 if(cycle.phase()==HorizontalCycle.Phase.SETTLE && velocity<.008) {reached=true;break;}
             }
             check(reached && walking>0,"normal approach safely reaches a stationary visible-face position");
         }
+        for(double retention:new double[]{.45,.546,.60,.65}) for(double acceleration:new double[]{.075,.098,.105})
+            for(double initialVelocity:new double[]{0,.05,.12,.18,.22}) {
+                cycle.reset();double distance=1.2,velocity=initialVelocity;boolean reached=false;
+                for(int t=0;t<240;t++) {
+                    cycle.update(true,false,false,false,distance,velocity);
+                    check(!cycle.crouch(),"bounded ground physics require no routine Shift");
+                    double step=velocity+(cycle.allowMovement()?acceleration*cycle.inputScale():0);
+                    distance-=step;velocity=step*retention;
+                    check(distance>-.27,"entire planned coast retains real support");
+                    if(cycle.phase()==HorizontalCycle.Phase.SETTLE && velocity<.008){reached=true;break;}
+                }
+                check(reached,"smooth supported approach reaches a visible face for every tested physics bound");
+                cycle.update(true,false,true,true,distance,velocity);
+                check(cycle.crouch() && !cycle.allowMovement() && !cycle.allowClick(),"prediction wait keeps its safety hold");
+                cycle.update(true,true,false,false,distance,velocity);
+                check(!cycle.crouch() && cycle.allowMovement(),"confirmation releases Shift without user input");
+            }
         // Dwell can finish on a moving, supported approach; global pending/cooldown still win.
         PlacementTracker moving=new PlacementTracker();cycle.reset();
         for(int t=0;t<3;t++) {

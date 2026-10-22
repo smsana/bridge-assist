@@ -43,6 +43,15 @@ public final class BridgeAssistClient implements ClientModInitializer {
     private static BlockPos lastClickTarget;
     private static Vec3d lastClickPoint;
     private static boolean horizontalClickAllowed;
+    private static long motionSampleTick=-1;
+    private static int motionSamples,motionSneak,motionOwnSneak,motionPhysicalSneak,motionWaiting,motionHeld;
+    private static void reportHorizontalMotion() {
+        if(motionSamples==0)return;
+        LOGGER.info("Horizontal pacing samples={} sneak={} modSneak={} inputSneak={} waitConfirm={} held={} phase={}",
+                motionSamples,motionSneak,motionOwnSneak,motionPhysicalSneak,motionWaiting,motionHeld,horizontal.phase());
+        motionSamples=motionSneak=motionOwnSneak=motionPhysicalSneak=motionWaiting=motionHeld=0;
+    }
+
     private static long aimVariationSeed = new java.util.Random().nextLong();
 
     private static KeyBinding toggle, settings, autoToggle;
@@ -594,7 +603,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
         // Retain it ONLY while its current real ray still hits the intended inset face.
         // This lets dwell and rotation packet lead-in overlap supported movement.
         var heldRotation=InteractionRotationManager.getAngles();
-        if(!upward && confirmedApproach() && target.equals(lockedPlacementTarget)
+        if(!upward && variant==0 && confirmedApproach() && target.equals(lockedPlacementTarget)
                 && variant==lockedVariant && lockedPlacementAim!=null && heldRotation!=null
                 && (support==null || support.equals(lockedPlacementAim.support()))
                 && (side==null || side==lockedPlacementAim.side())) {
@@ -821,6 +830,10 @@ public final class BridgeAssistClient implements ClientModInitializer {
         // Re-cast the real interaction ray immediately before vanilla consumes it.
         AimAnalysis finalHit=analyzeHit(c,target,support,side,hasCandidate);
         if(finalHit.hit()==null || !finalHit.face().equals(analysis.face())) return;
+        if(retryVariant(target)>0 && target.equals(lastClickTarget) && lastClickPoint!=null) {
+            double shift=finalHit.hit().getPos().distanceTo(lastClickPoint);
+            if(shift<.2-1e-5 || shift>.5+1e-5) {clearPlacementAim();return;}
+        }
         prepareInteractionRotation(c);
         if(!InteractionRotationManager.readyForInteraction())return;
         lastClickTarget=target.toImmutable();lastClickPoint=finalHit.hit().getPos();
@@ -965,6 +978,15 @@ public final class BridgeAssistClient implements ClientModInitializer {
             input.playerInput=new PlayerInput(input.movementForward>1e-5,input.movementForward< -1e-5,
                     input.movementSideways>1e-5,input.movementSideways< -1e-5,false,crouch,false);
         }
+        if(activeMode==VerticalCycle.Mode.HORIZONTAL && confirmedApproach() && motionSampleTick!=ticks) {
+            motionSampleTick=ticks;motionSamples++;
+            if(input.playerInput.sneak())motionSneak++;
+            if(sneak)motionOwnSneak++;
+            if(p.sneak())motionPhysicalSneak++;
+            if(horizontal.phase()==HorizontalCycle.Phase.WAIT_CONFIRM)motionWaiting++;
+            if(holdMovement)motionHeld++;
+            if(motionSamples>=100)reportHorizontalMotion();
+        }
     }
 
     private static boolean placementFace(MinecraftClient c,BlockPos support,BlockPos next) {
@@ -1033,6 +1055,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
                 || b instanceof FletchingTableBlock || b instanceof RespawnAnchorBlock;
     }
     private static void stopRun() {
+        reportHorizontalMotion();
         boolean active=InteractionRotationManager.isActive();
         InteractionRotationManager.clear();
         if(active)restoreVisualRotation(MinecraftClient.getInstance());
