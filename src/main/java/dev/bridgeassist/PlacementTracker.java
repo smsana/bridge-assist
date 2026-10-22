@@ -16,6 +16,8 @@ public final class PlacementTracker {
     private boolean reaim;
     private long observedTarget, observedTick = -1;
     private Face observedFace;
+    private float anchorYaw, anchorPitch;
+    private boolean angleAnchored;
     private boolean sawPrediction, sawFullBlock, lastTimeoutPredicted;
     private long lateTarget = Long.MIN_VALUE, lateSentAt = -1;
     private final Map<Face, Long> clickedFaces = new LinkedHashMap<>();
@@ -74,7 +76,20 @@ public final class PlacementTracker {
         return Result.NONE;
     }
     /** Re-aim requires fresh settled raycasts after a failure; normal clicks also use this settle counter. */
-    public void resetAim() { samples=0; observedTick=-1; observedFace=null; }
+    public void resetAim() { samples=0; observedTick=-1; observedFace=null; angleAnchored=false; }
+    /** Hold one real face AND an angle window; refreshing a rotation request is not a new aim. */
+    public void observeAim(long target, Face face, boolean settled, float yaw, float pitch, long tick) {
+        if(tick==observedTick)return;
+        if(!settled || !Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            angleAnchored=false;observeFace(target,face,false,tick);return;
+        }
+        boolean continuing=angleAnchored && observedTick==tick-1 && observedTarget==target
+                && face!=null && face.equals(observedFace)
+                && Math.abs(SpeedbridgeLogic.wrap(yaw-anchorYaw))<=.5
+                && Math.abs(pitch-anchorPitch)<=.5;
+        if(!continuing) {resetAim();anchorYaw=yaw;anchorPitch=pitch;angleAnchored=true;}
+        observeFace(target,face,true,tick);
+    }
     public void observeFace(long target, Face face, boolean settled, long tick) {
         if (reaim && tick <= reaimAfterTick) {
             observedTick = -1;

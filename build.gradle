@@ -2,7 +2,7 @@ plugins {
     id 'fabric-loom' version '1.9.2'
     id 'maven-publish'
 }
-version = '2.5.0'
+version = '2.5.1'
 group = 'dev.bridgeassist'
 base { archivesName = 'bridge-assist' }
 repositories { mavenCentral() }
@@ -52,3 +52,10 @@ tasks.register('interactionRotationTest', JavaExec) {
     mainClass = 'dev.bridgeassist.InteractionRotationTest'
 }
 tasks.named('check') { dependsOn 'interactionRotationTest' }
+
+tasks.register('faceAimTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.bridgeassist.FaceAimTest'
+}
+tasks.named('check') { dependsOn 'faceAimTest' }

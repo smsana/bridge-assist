@@ -37,14 +37,13 @@ public final class BridgeAssistClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("bridgeassist");
     private static final double STABLE_AIM_DEGREES = 0.5;
     private static final HorizontalCycle horizontal = new HorizontalCycle();
-    private static AimSolution lockedHorizontalAim;
-    private static BlockPos lockedHorizontalTarget;
+    private static AimSolution lockedPlacementAim;
+    private static BlockPos lockedPlacementTarget;
     private static int lockedVariant = -1;
     private static BlockPos lastClickTarget;
     private static Vec3d lastClickPoint;
     private static boolean horizontalClickAllowed;
-    private static float previousObservedYaw, previousObservedPitch;
-    private static int previousAimTick = -1;
+    private static long aimVariationSeed = new java.util.Random().nextLong();
 
     private static KeyBinding toggle, settings, autoToggle;
     private static final SpeedbridgeLogic.AutoControl auto = new SpeedbridgeLogic.AutoControl();
@@ -131,7 +130,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
         if(active && !InteractionRotationManager.isActive())restoreVisualRotation(c);
     }
     private static void prepareInteractionRotation(MinecraftClient c) {
-        InteractionRotationManager.requestAngles(targetYaw,targetPitch,2);
+        InteractionRotationManager.requestAngles(targetYaw,targetPitch,Math.max(2,effectiveAimSettleTicks()+1));
         if(!InteractionRotationManager.hasSentCurrentAngles() && c.getNetworkHandler()!=null) {
             var rotation=InteractionRotationManager.getAngles();
             c.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(
@@ -140,9 +139,12 @@ public final class BridgeAssistClient implements ClientModInitializer {
     }
     private static BlockHitResult interactionHit(MinecraftClient c) {
         var rotation=InteractionRotationManager.getAngles();
-        if(rotation==null || c.player==null || c.world==null)return null;
+        return rotation==null?null:raycastAngles(c,rotation.yaw(),rotation.pitch());
+    }
+    private static BlockHitResult raycastAngles(MinecraftClient c,float yaw,float pitch) {
+        if(c.player==null || c.world==null)return null;
         Vec3d eye=c.player.getEyePos();
-        Vec3d end=eye.add(Vec3d.fromPolar(rotation.pitch(),rotation.yaw()).multiply(c.player.getBlockInteractionRange()));
+        Vec3d end=eye.add(Vec3d.fromPolar(pitch,yaw).multiply(c.player.getBlockInteractionRange()));
         return c.world.raycast(new RaycastContext(eye,end,RaycastContext.ShapeType.OUTLINE,
                 RaycastContext.FluidHandling.NONE,c.player));
     }
@@ -172,7 +174,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
         if(!bound.equals(config.autoBuildKey)) {config.autoBuildKey=bound;config.save();}
         while(autoToggle.wasPressed()) if(c.currentScreen==null) {
             if(failureStop) {
-                failureStop=false;repeatAttempts=0;repeatTarget=null;clearHorizontalAim();
+                failureStop=false;repeatAttempts=0;repeatTarget=null;clearPlacementAim();
                 if(config.autoBuild) auto.resume();
                 c.player.sendMessage(Text.translatable("message.bridgeassist.failure_resume"),true);
                 continue;
@@ -222,7 +224,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
         }
         BlockPos next = support.offset(travel);
         waitingFace=false;
-        updateAimForPlacement(c,next,support,travel,false);
+        boolean hasCandidate=updateAimForPlacement(c,next,support,travel,false);
         if(config.requireConfirmedSupport && full(c,next) && predicted(c,next)) {sneak=holdMovement=true;return;}
         if(waitingPlacement() || now()<placements.backoffUntil()) {sneak=holdMovement=true;return;}
         if(automatic() && !c.world.isSpaceEmpty(c.player,c.player.getBoundingBox().offset(
@@ -235,9 +237,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
             warn(c, "message.bridgeassist.no_blocks");
             return;
         }
-        if (originalSlot < 0) originalSlot = c.player.getInventory().selectedSlot;
-        c.player.getInventory().selectedSlot = slot;
-        autoSlot = slot;
+        equip(c,slot);
         long now=now();timing.updateCamera(now);
         boolean safePause=c.player.getBoundingBox().minX>=support.getX()+.005
                 && c.player.getBoundingBox().maxX<=support.getX()+.995
@@ -247,11 +247,16 @@ public final class BridgeAssistClient implements ClientModInitializer {
             sneak=holdMovement=true;return;
         }
         boolean ready = aimReady(c);
+        double distance = edgeDistance(c.player, support);
         if (!ready) {
             sneak = holdMovement = true;
+            // A side face is invisible from the centre of its own support block.
+            // Approach crouched on the existing floor instead of waiting forever for that face.
+            if(!hasCandidate && distance>-.12 && canReplace(c,next)
+                    && c.world.isSpaceEmpty(c.player,c.player.getBoundingBox().offset(
+                    travel.getOffsetX()*.08,0,travel.getOffsetZ()*.08)))holdMovement=false;
             return;
         }
-        double distance = edgeDistance(c.player, support);
         boolean nextIsFloor = movementSupportPresent(c,next);
         // Ordinary unshifted movement across each new block. Shift only at its end.
         boolean emergency=SpeedbridgeLogic.sneakAtEdge(nextIsFloor,distance,config.sneakDistance);
@@ -260,6 +265,10 @@ public final class BridgeAssistClient implements ClientModInitializer {
         // Stop rather than walk into water, non-replaceable obstacles or a workstation.
         if (!nextIsFloor && distance <= config.sneakDistance && !canReplace(c, next))
             sneak = holdMovement = true;
+        if(!nextIsFloor && distance<=-.12) {
+            // Finish the configured dwell while stationary, even with confirmed-support opt-out.
+            sneak=holdMovement=true;waitingFace=true;
+        }
         if(automatic() && !nextIsFloor && distance<=-.26 && !placementFace(c,support,next)) {
             // Keep re-evaluating the real ray while stationary; never fabricate a hit.
             sneak=holdMovement=true;waitingFace=true;
@@ -296,13 +305,13 @@ public final class BridgeAssistClient implements ClientModInitializer {
             return;
         }
         if (horizontal.phase()==HorizontalCycle.Phase.CROSS) {
-            clearHorizontalAim();
+            clearPlacementAim();
             // Preserve the selected bridge axis while moving to the confirmed block.
             targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
             return;
         }
         if (!horizontalClickAllowed) {
-            clearHorizontalAim();
+            clearPlacementAim();
             targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
             return;
         }
@@ -313,12 +322,14 @@ public final class BridgeAssistClient implements ClientModInitializer {
                 && c.player.getBoundingBox().maxZ<=support.getZ()+.995;
         if(config.humanize && timing.pause(now(),contained,config.randomPauses))horizontalClickAllowed=false;
     }
-    private static void clearHorizontalAim() {
-        lockedHorizontalAim=null;lockedHorizontalTarget=null;lockedVariant=-1;
+    private static void clearPlacementAim() {
+        lockedPlacementAim=null;lockedPlacementTarget=null;lockedVariant=-1;
+        placements.resetAim();
     }
 
     private static void beginRun(MinecraftClient c, int requestedSide) {
         side = requestedSide;
+        clearPlacementAim();aimVariationSeed=new java.util.Random().nextLong();
         boolean follow=activeMode==VerticalCycle.Mode.HORIZONTAL && SpeedbridgeLogic.stance(config.stanceMode)==SpeedbridgeLogic.Stance.FOLLOW_INPUT;
         SpeedbridgeLogic.Heading heading=follow?SpeedbridgeLogic.heading(c.player.getYaw(),side):bridgeAxis.fixed(c.player.getYaw(),side);
         if(follow)bridgeAxis.remember(heading,side);
@@ -363,7 +374,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
     }
     private static void confirmed(MinecraftClient c, BlockPos pos) {
         LOGGER.info("Placement reconciled target={} medianLatencyMs={}",pos,placements.medianLatencyMs());
-        timing.placed(now());unconfirmedTarget=null;repeatAttempts=0;repeatTarget=null;clearHorizontalAim();
+        timing.placed(now());unconfirmedTarget=null;repeatAttempts=0;repeatTarget=null;clearPlacementAim();
         if(vertical!=null && verticalBase!=null && vertical.phase()==VerticalCycle.Phase.JUMP
                 && pos.equals(verticalBase.up()))vertical.confirmed();
     }
@@ -403,7 +414,8 @@ public final class BridgeAssistClient implements ClientModInitializer {
         return pos!=null && PlacementTracker.supportConfirmed(full(c,pos), predicted(c,pos));
     }
     private static boolean movementSupportPresent(MinecraftClient c, BlockPos pos) {
-        return pos!=null && PlacementTracker.allowMovementOnSupport(config.requireConfirmedSupport, full(c,pos), predicted(c,pos));
+        // Opting out of confirmation permits predicted blocks, never empty air.
+        return pos!=null && full(c,pos) && PlacementTracker.allowMovementOnSupport(config.requireConfirmedSupport, true, predicted(c,pos));
     }
     private static BlockPos feetSupport(MinecraftClient c) {
         return feetSupport(c,false);
@@ -459,7 +471,9 @@ public final class BridgeAssistClient implements ClientModInitializer {
         return Math.max(1, Math.min(6, config.aimSettleTicks + placements.latencySettleBonusTicks()));
     }
     private static void equip(MinecraftClient c, int slot) {
-        if(originalSlot<0)originalSlot=c.player.getInventory().selectedSlot;
+        int current=c.player.getInventory().selectedSlot;
+        if(slot<0 || slot==current)return;
+        if(originalSlot<0)originalSlot=current;
         c.player.getInventory().selectedSlot=slot;autoSlot=slot;
     }
     private static int blockCount(MinecraftClient c, BlockPos target) {
@@ -561,7 +575,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
             BlockPos target=verticalBase.up();
             updateAimForPlacement(c,target,null,null,true);
             AimAnalysis analysis=analyzeHit(c,target,null,null,hasPlacementAim(c,target,null,null,true));
-            placements.observeFace(target.asLong(),analysis.hit()==null?null:analysis.face(),clickAimStable(c) && analysis.hit()!=null,ticks);
+            observePlacementAim(c,target,analysis,clickAimStable(c));
             Box box=c.player.getBoundingBox();
             if(vertical.canPlace(now(),box.minY,target.getY()+1,bodyClear(c,target),analysis.hit()!=null))
                 tryPlace(c,target,null,null,true);
@@ -577,12 +591,16 @@ public final class BridgeAssistClient implements ClientModInitializer {
         }
         double preferredPitch = upward ? (activeMode==VerticalCycle.Mode.TOWER?config.towerPitch:config.staircasePitch)
                 : (BridgeAssistClient.side==0?config.straightPitch:config.diagonalPitch);
-        boolean lock = confirmedApproach();
+        // One point per target/attempt, also in legacy/manual and vertical READY modes.
+        // Re-sampling a point on every tick makes a long settle window unreachable.
         int variant=retryVariant(target);
         AimSolution solution=upward?chooseVerticalAim(c,target,preferredPitch):null;
-        if(lock && target.equals(lockedHorizontalTarget) && variant==lockedVariant
-                && lockedHorizontalAim!=null && visibleAim(c,lockedHorizontalAim)) {
-            AimSolution old=lockedHorizontalAim;
+        if(target.equals(lockedPlacementTarget) && variant==lockedVariant
+                && lockedPlacementAim!=null
+                && (support==null || support.equals(lockedPlacementAim.support()))
+                && (side==null || side==lockedPlacementAim.side())
+                && visibleAim(c,lockedPlacementAim)) {
+            AimSolution old=lockedPlacementAim;
             Vec3d delta=old.point().subtract(c.player.getEyePos());
             BridgeMath.Aim aim=BridgeMath.lookAt(delta.x,delta.y,delta.z);
             solution=new AimSolution(old.support(),old.side(),old.point(),aim.yaw(),aim.pitch(),old.score());
@@ -591,10 +609,14 @@ public final class BridgeAssistClient implements ClientModInitializer {
             solution = support!=null && side!=null
                     ? chooseFaceAim(c,support,side,axisYaw,preferredPitch,variant)
                     : chooseNeighbourAim(c,target,axisYaw,preferredPitch,variant);
-            if(lock) {
-                placements.resetAim();previousAimTick=-1;
-                lockedHorizontalAim=solution;lockedHorizontalTarget=target.toImmutable();lockedVariant=variant;
-            }
+        }
+        if(solution!=null) {
+            boolean samePoint=target.equals(lockedPlacementTarget) && variant==lockedVariant
+                    && lockedPlacementAim!=null && lockedPlacementAim.support().equals(solution.support())
+                    && lockedPlacementAim.side()==solution.side()
+                    && lockedPlacementAim.point().squaredDistanceTo(solution.point())<1e-10;
+            if(!samePoint)placements.resetAim();
+            lockedPlacementAim=solution;lockedPlacementTarget=target.toImmutable();lockedVariant=variant;
         }
         if(solution==null) return false;
         targetYaw=solution.yaw();
@@ -616,8 +638,11 @@ public final class BridgeAssistClient implements ClientModInitializer {
     private static boolean visibleAim(MinecraftClient c, AimSolution aim) {
         Vec3d eye=c.player.getEyePos();
         if(eye.squaredDistanceTo(aim.point())>Math.pow(c.player.getBlockInteractionRange(),2))return false;
-        BlockHitResult ray=c.world.raycast(new RaycastContext(eye,aim.point(),RaycastContext.ShapeType.OUTLINE,
-                RaycastContext.FluidHandling.NONE,c.player));
+        Vec3d delta=aim.point().subtract(eye);
+        BridgeMath.Aim angles=BridgeMath.lookAt(delta.x,delta.y,delta.z);
+        // Minecraft's fromPolar uses lookup-table trig: a geometrically visible point
+        // does not guarantee that the quantized interaction ray is inside its margin.
+        BlockHitResult ray=raycastAngles(c,angles.yaw(),angles.pitch());
         return ray.getType()==HitResult.Type.BLOCK && ray.getBlockPos().equals(aim.support())
                 && ray.getSide()==aim.side() && pointInsideMargin(ray,config.faceEdgeMargin);
     }
@@ -639,6 +664,12 @@ public final class BridgeAssistClient implements ClientModInitializer {
         return best;
     }
     private static AimSolution chooseFaceAim(MinecraftClient c, BlockPos support, Direction face, float desiredYaw, double desiredPitch, int variant) {
+        AimSolution varied=chooseFaceAim(c,support,face,desiredYaw,desiredPitch,variant,config.humanize);
+        // Cosmetic offsets must not remove a valid placement or spend a retry.
+        return varied!=null || !config.humanize ? varied
+                : chooseFaceAim(c,support,face,desiredYaw,desiredPitch,variant,false);
+    }
+    private static AimSolution chooseFaceAim(MinecraftClient c, BlockPos support, Direction face, float desiredYaw, double desiredPitch, int variant, boolean vary) {
         Vec3d eye=c.player.getEyePos();
         double rangeSq=Math.pow(c.player.getBlockInteractionRange(),2);
         double[] primary=offsets(variant, shiftAmount());
@@ -647,20 +678,26 @@ public final class BridgeAssistClient implements ClientModInitializer {
         for(int i=0;i<primary.length;i++) for(int j=0;j<secondary.length;j++) {
             // Leave room for float yaw/pitch quantization when re-casting the packet angle.
             double inset=config.faceEdgeMargin+.002;
-            Vec3d point=facePoint(support,face,MathHelper.clamp(primary[i],inset,1-inset),
-                    MathHelper.clamp(secondary[j],inset,1-inset));
+            double a=FaceAimVariation.coordinate(primary[i],inset,vary,aimVariationSeed,
+                    support.asLong(),face.ordinal(),variant,i,j,0);
+            double b=FaceAimVariation.coordinate(secondary[j],inset,vary,aimVariationSeed,
+                    support.asLong(),face.ordinal(),variant,i,j,1);
+            Vec3d point=facePoint(support,face,a,b);
             if(variant>0 && support.offset(face).equals(lastClickTarget) && lastClickPoint!=null) {
                 double shift=point.distanceTo(lastClickPoint);
                 if(shift<.2-1e-5 || shift>.5+1e-5)continue;
             }
             if(eye.squaredDistanceTo(point)>rangeSq)continue;
-            BlockHitResult ray=c.world.raycast(new RaycastContext(eye,point,RaycastContext.ShapeType.OUTLINE,
-                    RaycastContext.FluidHandling.NONE,c.player));
-            if(ray.getType()!=HitResult.Type.BLOCK || !ray.getBlockPos().equals(support) || ray.getSide()!=face)continue;
-            if(!pointInsideMargin(ray,config.faceEdgeMargin))continue;
             Vec3d delta=point.subtract(eye);
             float yaw=(float)Math.toDegrees(Math.atan2(-delta.x,delta.z));
             float pitch=(float)-Math.toDegrees(Math.atan2(delta.y,Math.hypot(delta.x,delta.z)));
+            BlockHitResult ray=raycastAngles(c,yaw,pitch);
+            if(ray.getType()!=HitResult.Type.BLOCK || !ray.getBlockPos().equals(support) || ray.getSide()!=face)continue;
+            if(!pointInsideMargin(ray,config.faceEdgeMargin))continue;
+            if(variant>0 && support.offset(face).equals(lastClickTarget) && lastClickPoint!=null) {
+                double shift=ray.getPos().distanceTo(lastClickPoint);
+                if(shift<.2-1e-5 || shift>.5+1e-5)continue;
+            }
             double score=Math.abs(MathHelper.wrapDegrees(yaw-desiredYaw))+2*Math.abs(pitch-desiredPitch)+i*.01+j*.001;
             AimSolution candidate=new AimSolution(support,face,point,yaw,pitch,score);
             if(best==null || candidate.score()<best.score())best=candidate;
@@ -727,6 +764,12 @@ public final class BridgeAssistClient implements ClientModInitializer {
             return new AimAnalysis(null,face(hit),PlacementTracker.FailureReason.AIM_MISS);
         return new AimAnalysis(hit,face(hit),null);
     }
+    private static void observePlacementAim(MinecraftClient c, BlockPos target, AimAnalysis analysis, boolean stable) {
+        var rotation=InteractionRotationManager.getAngles();
+        placements.observeAim(target.asLong(),analysis.hit()==null?null:analysis.face(),
+                stable && analysis.hit()!=null && rotation!=null,
+                rotation==null?0:rotation.yaw(),rotation==null?0:rotation.pitch(),ticks);
+    }
     private static void tryPlace(MinecraftClient c, BlockPos target, BlockPos support, Direction side, boolean upward) {
         if(waitingPlacement() || failureStop)return;
         boolean hasCandidate=updateAimForPlacement(c,target,support,side,upward);
@@ -734,18 +777,8 @@ public final class BridgeAssistClient implements ClientModInitializer {
         MinecraftClientAccessor accessor=(MinecraftClientAccessor)c;
         AimAnalysis analysis=analyzeHit(c,target,support,side,hasCandidate);
         boolean stable=hasCandidate && clickAimStable(c);
-        if(confirmedApproach()) {
-            var rotation=InteractionRotationManager.getAngles();
-            boolean consecutive=rotation!=null && previousAimTick==ticks-1;
-            boolean stationary=consecutive && Math.abs(MathHelper.wrapDegrees(rotation.yaw()-previousObservedYaw))<=STABLE_AIM_DEGREES
-                    && Math.abs(rotation.pitch()-previousObservedPitch)<=STABLE_AIM_DEGREES;
-            if(previousAimTick!=ticks) {
-                if(rotation!=null) {previousObservedYaw=rotation.yaw();previousObservedPitch=rotation.pitch();}
-                previousAimTick=ticks;
-            }
-            stable &= stationary && c.player.getVelocity().horizontalLength()<.008;
-        }
-        placements.observeFace(target.asLong(),analysis.hit()==null?null:analysis.face(),stable && analysis.hit()!=null,ticks);
+        if(confirmedApproach())stable &= c.player.getVelocity().horizontalLength()<.008;
+        observePlacementAim(c,target,analysis,stable);
         if(upward && (vertical==null || !vertical.canPlace(now,c.player.getBoundingBox().minY,target.getY()+1,
                 bodyClear(c,target),analysis.hit()!=null)))return;
         if(!stable || !placements.idle(now,config.minPlaceIntervalMs) || !bodyClear(c,target)
@@ -779,7 +812,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
         lastClickTarget=target.toImmutable();lastClickPoint=finalHit.hit().getPos();
         placements.clicked(target.asLong(),finalHit.face(),ticks,now);
         unconfirmedTarget=target.toImmutable();
-        InteractionRotationManager.requestAngles(targetYaw,targetPitch,2);
+        InteractionRotationManager.requestAngles(targetYaw,targetPitch,Math.max(2,effectiveAimSettleTicks()+1));
         var rotation=InteractionRotationManager.getAngles();
         ClientPlayerEntityAccessor playerAngles=(ClientPlayerEntityAccessor)c.player;
         float visualYaw=playerAngles.bridgeassist$getYaw(),visualPitch=playerAngles.bridgeassist$getPitch();
@@ -1002,7 +1035,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
             }
         }
         running = false;
-        horizontalClickAllowed=false;clearHorizontalAim();previousAimTick=-1;
+        horizontalClickAllowed=false;clearPlacementAim();
         vertical=null;verticalBase=null;stairReserved=false;
         sneak = holdMovement = false;
         yawAxis.reset(); pitchAxis.reset();
