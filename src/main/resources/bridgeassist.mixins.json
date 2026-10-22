@@ -7,7 +7,9 @@
     "KeyboardInputMixin",
     "MouseMixin",
     "ClientWorldAccessor",
-    "PendingUpdateManagerAccessor"
+    "PendingUpdateManagerAccessor",
+    "ClientPlayerEntityAccessor",
+    "ClientPlayNetworkHandlerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
