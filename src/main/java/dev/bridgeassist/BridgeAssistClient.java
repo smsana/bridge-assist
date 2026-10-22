@@ -310,13 +310,7 @@ public final class BridgeAssistClient implements ClientModInitializer {
             targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
             return;
         }
-        if (!horizontalClickAllowed && horizontal.phase()==HorizontalCycle.Phase.APPROACH) {
-            clearPlacementAim();
-            targetYaw=axisYaw;targetPitch=(float)(side==0?config.straightPitch:config.diagonalPitch);
-            return;
-        }
-        // Prepare the real interaction ray while braking; clicking still requires SETTLE.
-
+        // Acquire the face as soon as it is genuinely visible, even while moving.
         updateAimForPlacement(c,next,support,travel,false);
         boolean contained=c.player.getBoundingBox().minX>=support.getX()+.005
                 && c.player.getBoundingBox().maxX<=support.getX()+.995
@@ -596,6 +590,25 @@ public final class BridgeAssistClient implements ClientModInitializer {
         // One point per target/attempt, also in legacy/manual and vertical READY modes.
         // Re-sampling a point on every tick makes a long settle window unreachable.
         int variant=retryVariant(target);
+        // Hold an actual angle window, not a world-space point that moves relative to the eye.
+        // Retain it ONLY while its current real ray still hits the intended inset face.
+        // This lets dwell and rotation packet lead-in overlap supported movement.
+        var heldRotation=InteractionRotationManager.getAngles();
+        if(!upward && confirmedApproach() && target.equals(lockedPlacementTarget)
+                && variant==lockedVariant && lockedPlacementAim!=null && heldRotation!=null
+                && (support==null || support.equals(lockedPlacementAim.support()))
+                && (side==null || side==lockedPlacementAim.side())) {
+            BlockHitResult ray=raycastAngles(c,heldRotation.yaw(),heldRotation.pitch());
+            if(ray.getType()==HitResult.Type.BLOCK
+                    && ray.getBlockPos().equals(lockedPlacementAim.support())
+                    && ray.getSide()==lockedPlacementAim.side()
+                    && ray.getBlockPos().offset(ray.getSide()).equals(target)
+                    && pointInsideMargin(ray,config.faceEdgeMargin)) {
+                targetYaw=heldRotation.yaw();targetPitch=heldRotation.pitch();
+                prepareInteractionRotation(c);
+                return true;
+            }
+        }
         AimSolution solution=upward?chooseVerticalAim(c,target,preferredPitch):null;
         if(target.equals(lockedPlacementTarget) && variant==lockedVariant
                 && lockedPlacementAim!=null
@@ -779,7 +792,6 @@ public final class BridgeAssistClient implements ClientModInitializer {
         MinecraftClientAccessor accessor=(MinecraftClientAccessor)c;
         AimAnalysis analysis=analyzeHit(c,target,support,side,hasCandidate);
         boolean stable=hasCandidate && clickAimStable(c);
-        if(confirmedApproach())stable &= c.player.getVelocity().horizontalLength()<.008;
         observePlacementAim(c,target,analysis,stable);
         if(upward && (vertical==null || !vertical.canPlace(now,c.player.getBoundingBox().minY,target.getY()+1,
                 bodyClear(c,target),analysis.hit()!=null)))return;

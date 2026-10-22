@@ -15,21 +15,21 @@ public final class PlacementTest {
     private static void horizontalNetworkTests() {
         HorizontalCycle cycle=new HorizontalCycle();
         check(cycle.update(true,false,false,false,.5,0)==HorizontalCycle.Phase.APPROACH,"approach starts on confirmed old floor");
-        check(cycle.allowMovement() && !cycle.crouch() && cycle.inputScale()==1 && !cycle.allowClick(),"safe approach is normal walking, never permanent crouch");
-        check(cycle.update(true,false,false,false,-.121,0)==HorizontalCycle.Phase.SETTLE,"stop at safe overhang");
+        check(cycle.allowMovement() && !cycle.crouch() && cycle.inputScale()==1 && cycle.allowClick(),"safe approach is normal walking, never permanent crouch");
+        check(cycle.update(true,false,false,false,-.181,0)==HorizontalCycle.Phase.SETTLE,"stop at safe overhang");
         check(!cycle.allowMovement() && cycle.allowClick(),"stopped movement DOES NOT disable placement");
         cycle.reset();
         check(cycle.update(true,false,false,false,.10,.10)==HorizontalCycle.Phase.BRAKE,"braking includes residual velocity before edge");
-        check(!cycle.allowMovement() && cycle.crouch() && !cycle.allowClick(),"brake is stationary and cannot click");
+        check(!cycle.allowMovement() && cycle.crouch() && cycle.allowClick(),"braking does not forbid a separately validated ray");
         check(cycle.update(true,false,false,false,.10,0)==HorizontalCycle.Phase.EDGE_APPROACH,"stopped before edge resumes only a short controlled approach");
-        check(cycle.allowMovement() && cycle.crouch() && cycle.inputScale()==.65,"only edge approach uses reduced crouch input");
-        check(cycle.update(true,false,false,false,-.081,.03)==HorizontalCycle.Phase.SETTLE,"visible-face overhang stops motion");
+        check(cycle.allowMovement() && cycle.allowClick() && cycle.crouch() && cycle.inputScale()==.65,"only edge approach uses reduced crouch input");
+        check(cycle.update(true,false,false,false,-.181,.03)==HorizontalCycle.Phase.SETTLE,"visible-face overhang stops motion");
         check(cycle.crouch() && !cycle.allowMovement() && cycle.allowClick(),"settle holds and allows normal placement checks");
-        check(cycle.update(true,true,false,false,-.081,0)==HorizontalCycle.Phase.CROSS,"confirmed next block immediately releases brake");
+        check(cycle.update(true,true,false,false,-.181,0)==HorizontalCycle.Phase.CROSS,"confirmed next block immediately releases brake");
         check(!cycle.crouch() && cycle.inputScale()==1 && cycle.allowMovement(),"confirmed crossing is normal walking");
         cycle.reset();
         check(cycle.update(true,false,false,false,.5,0)==HorizontalCycle.Phase.APPROACH,"new run does not inherit edge creep");
-        check(cycle.update(true,false,false,true,-.12,0)==HorizontalCycle.Phase.WAIT_CONFIRM,"foreign prediction blocks motion too");
+        check(cycle.update(true,false,false,true,-.20,0)==HorizontalCycle.Phase.WAIT_CONFIRM,"foreign prediction blocks motion too");
         check(!cycle.allowMovement() && !cycle.allowClick(),"predicted floor is neither permission to walk nor repeat");
         check(cycle.update(false,true,false,false,.1,0)==HorizontalCycle.Phase.UNSAFE,"lost old support beats confirmed next");
         for(int delay:new int[]{1,3,10,30,100,300}) for(boolean accept:new boolean[]{true,false}) {
@@ -38,7 +38,7 @@ public final class PlacementTest {
             for(int tick=1;tick<=delay;tick++) {
                 check(p.observeWorld(false,true,tick,tick*50L,p.confirmationTimeoutTicks())==PlacementTracker.Result.NONE,
                         "live server-unresolved prediction is not a rejection, even beyond timeout");
-                cycle.update(true,false,true,true,-.12,0);
+                cycle.update(true,false,true,true,-.20,0);
                 check(!cycle.allowMovement() && !cycle.allowClick(),"no crossing or duplicate click during delayed reconciliation");
                 check(p.pending()!=null && p.failures()==0,"network wait does not spend retry budget");
             }
@@ -46,7 +46,7 @@ public final class PlacementTest {
             var result=p.observeWorld(accept,false,delay+1,at,p.confirmationTimeoutTicks());
             if(accept) {
                 check(result==PlacementTracker.Result.CONFIRMED,"delayed server reconciliation confirms actual block");
-                check(cycle.update(true,true,false,false,-.12,0)==HorizontalCycle.Phase.CROSS,"confirmation automatically resumes movement");
+                check(cycle.update(true,true,false,false,-.20,0)==HorizontalCycle.Phase.CROSS,"confirmation automatically resumes movement");
                 check(cycle.allowMovement(),"no B needed after successful reconciliation");
                 check(!p.idle(at+299,300) && p.idle(at+300,300),"click cooldown still starts at confirmation, not send");
                 for(int t=1;t<=20;t++) {
@@ -55,7 +55,7 @@ public final class PlacementTest {
                 }
             } else {
                 // An absent block while no prediction remains never grants movement.
-                check(cycle.update(true,false,result==PlacementTracker.Result.NONE,false,-.12,0)
+                check(cycle.update(true,false,result==PlacementTracker.Result.NONE,false,-.20,0)
                         !=HorizontalCycle.Phase.CROSS,"rejection retains old confirmed support");
                 check(!cycle.allowMovement(),"no forward movement after rejection");
             }
@@ -72,6 +72,17 @@ public final class PlacementTest {
             }
             check(reached && walking>0,"normal approach safely reaches a stationary visible-face position");
         }
+        // Dwell can finish on a moving, supported approach; global pending/cooldown still win.
+        PlacementTracker moving=new PlacementTracker();cycle.reset();
+        for(int t=0;t<3;t++) {
+            cycle.update(true,false,false,false,.18-t*.02,.03);
+            check(cycle.allowClick(),"residual movement cannot disable valid aim sampling");
+            moving.observeAim(9,face(8),true,30,80,t);
+        }
+        check(moving.canClick(9,face(8),false,2,100,300,3),"three valid angle samples allow moving click");
+        check(!moving.canClick(9,face(8),true,2,100,300,3),"moving click never overrides occupied target");
+        moving.clicked(9,face(8),2,100);
+        check(!moving.canClick(10,face(9),false,3,150,300,1),"moving click retains global pending gate");
         PlacementTracker noReply=new PlacementTracker();noReply.clicked(1,face(0),0,0);
         check(noReply.observeWorld(false,false,20,1000,20)==PlacementTracker.Result.TIMED_OUT,"no-result attempt eventually times out");
         check(!noReply.timeoutSawPrediction(),"no evidence of prediction must not be called server rollback");
